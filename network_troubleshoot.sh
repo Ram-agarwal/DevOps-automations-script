@@ -1,6 +1,13 @@
 #!/bin/bash
+set -o pipefail
 
-TARGET=$1
+# ========= CONFIG (Only this changes per project) =========
+TARGET="$1"   # Target IP or Domain
+PORTS=(80 443 22 3306 5432)
+
+# ========= REPORT SETUP =========
+REPORT_FILE="/tmp/network_report_$(date +%F_%H-%M-%S).log"
+exec > >(tee -a "$REPORT_FILE") 2>&1
 
 echo "================================================="
 echo " NETWORK TROUBLESHOOT REPORT"
@@ -13,11 +20,27 @@ echo
 ############################
 if [ -z "$TARGET" ]; then
   echo "❌ ERROR: Please provide IP or Domain"
-  echo "👉 Usage: ./network_troubleshoot.sh google.com OR 8.8.8.8"
+  echo "👉 Usage: sudo ./network_troubleshoot.sh <IP_or_DOMAIN>"
   exit 1
 fi
 
 echo "🎯 TARGET: $TARGET"
+echo
+
+############################
+# ROOT CHECK (Prod Safety)
+############################
+if [ "$EUID" -ne 0 ]; then
+  echo "⚠️ Warning: Some checks need root (firewall, tcpdump, dmesg)."
+  echo "👉 Best practice: sudo ./network_troubleshoot.sh $TARGET"
+fi
+echo
+
+############################
+# OS INFO
+############################
+echo "🖥 OS INFO"
+lsb_release -a 2>/dev/null || cat /etc/os-release
 echo
 
 ############################
@@ -45,36 +68,47 @@ echo
 # 4️⃣ DNS RESOLUTION TEST
 ############################
 echo "4️⃣ DNS RESOLUTION TEST"
-getent hosts $TARGET || nslookup $TARGET
-echo
+if getent hosts "$TARGET" >/dev/null 2>&1; then
+  getent hosts "$TARGET"
+elif command -v nslookup >/dev/null 2>&1; then
+  nslookup "$TARGET"
+else
+  echo "❌ DNS tools not available"
+fi
+
 
 ############################
 # 5️⃣ DEFAULT GATEWAY CHECK
 ############################
-echo "5️⃣ DEFAULT GATEWAY CONNECTIVITY"
 GATEWAY=$(ip route | awk '/default/ {print $3}')
-ping -c 3 $GATEWAY
-echo
+if [ -n "$GATEWAY" ]; then
+  ping -c 3 -W 2 "$GATEWAY"
+else
+  echo "❌ No default gateway found"
+fi
 
 ############################
 # 6️⃣ INTERNET CONNECTIVITY
 ############################
-echo "6️⃣ INTERNET CONNECTIVITY TEST"
-ping -c 3 8.8.8.8
+echo "6️⃣ INTERNET CONNECTIVITY"
+ping -c 2 -W 2 8.8.8.8 >/dev/null 2>&1 \
+  && echo "✅ Internet reachable (8.8.8.8)" \
+  || echo "❌ No internet connectivity"
+curl -Is https://google.com | head -1 || echo "❌ HTTPS outbound blocked"
 echo
 
 ############################
 # 7️⃣ TARGET CONNECTIVITY
 ############################
 echo "7️⃣ TARGET CONNECTIVITY (PING)"
-ping -c 4 $TARGET
+ping -c 4 -W 2 "$TARGET"
 echo
 
 ############################
 # 8️⃣ PORT CONNECTIVITY TEST
 ############################
 echo "8️⃣ PORT CONNECTIVITY TEST"
-for port in 80 443 22 3306 5432; do
+for port in "${PORTS[@]}"; do
   timeout 3 bash -c "</dev/tcp/$TARGET/$port" \
     && echo "✅ Port $port OPEN" \
     || echo "❌ Port $port CLOSED"
@@ -92,22 +126,22 @@ echo
 # 🔟 LISTENING PORTS
 ############################
 echo "🔟 LISTENING PORTS"
-ss -tulnp
+ss -tulnp 2>/dev/null || echo "⚠️ Run as root to see listening process details"
 echo
 
 ############################
 # 1️⃣1️⃣ FIREWALL STATUS
 ############################
 echo "1️⃣1️⃣ FIREWALL STATUS"
-iptables -L -n 2>/dev/null || ufw status
+iptables -L -n 2>/dev/null || nft list ruleset 2>/dev/null || ufw status 2>/dev/null || echo "⚠️ Firewall status not accessible"
 echo
 
 ############################
-# 1️⃣2️⃣ NETWORK LOGS (journalctl)
+# 1️⃣2️⃣ NETWORK LOGS
 ############################
-echo "1️⃣2️⃣ NETWORK RELATED LOGS (journalctl)"
-journalctl -u NetworkManager --since "1 hour ago" 2>/dev/null
-journalctl -p 3 --since "1 hour ago" | grep -i network
+echo "1️⃣2️⃣ NETWORK RELATED LOGS (last 1 hour)"
+journalctl -u NetworkManager --since "1 hour ago" 2>/dev/null | tail -20
+journalctl -p 3 --since "1 hour ago" | grep -i network | tail -20
 echo
 
 ############################
@@ -118,20 +152,24 @@ dmesg | grep -i -E "network|eth|dns|timeout|unreachable|packet" | tail -20
 echo
 
 ############################
-# 1️⃣4️⃣ TRACEROUTE (PATH ISSUE)
+# 1️⃣4️⃣ TRACEROUTE
 ############################
-echo "1️⃣4️⃣ TRACEROUTE"
-traceroute -m 10 $TARGET || tracepath $TARGET
+
+echo "1️⃣4️⃣ TRACEROUTE / TRACEPATH"
+
+if command -v traceroute &> /dev/null; then
+  traceroute -m 20 -w 2 "$TARGET"
+elif command -v tracepath &> /dev/null; then
+  tracepath -n -m 20 "$TARGET"
+else
+  echo "⚠️ traceroute/tracepath not installed. Skipping path analysis."
+fi
+
 echo
 
-############################
-# 1️⃣5️⃣ TCPDUMP (LIVE PACKET CHECK)
-############################
-echo "1️⃣5️⃣ TCPDUMP (10 packets sample)"
-echo "ℹ Capturing traffic for $TARGET (Press Ctrl+C to stop)"
-timeout 10 tcpdump -i any host $TARGET -nn 2>/dev/null
-echo
 
 echo "================================================="
 echo " NETWORK TROUBLESHOOT COMPLETED"
+echo "📄 Report saved at: $REPORT_FILE"
 echo "================================================="
+
