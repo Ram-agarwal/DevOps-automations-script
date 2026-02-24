@@ -65,6 +65,13 @@ aws autoscaling describe-auto-scaling-groups \
 --query "AutoScalingGroups[].{Name:AutoScalingGroupName,Min:MinSize,Max:MaxSize,Desired:DesiredCapacity}" \
 --output table
 
+echo -e "\n🎯 UNUSED TARGET GROUPS (LB Hidden Cost):"
+aws elbv2 describe-target-groups \
+--query "TargetGroups[].{TG:TargetGroupName,ARN:TargetGroupArn}" \
+--output table
+
+
+
 ########################################
 # EBS IN USE
 ########################################
@@ -73,6 +80,12 @@ aws ec2 describe-volumes \
 --filters Name=status,Values=in-use \
 --query "Volumes[].{VolumeId:VolumeId,SizeGB:Size,AZ:AvailabilityZone}" \
 --output table
+
+aws ec2 describe-volumes \
+--filters Name=status,Values=available \
+--query "Volumes[].{VolumeId:VolumeId,SizeGB:Size,Type:VolumeType,AZ:AvailabilityZone}" \
+--output table
+
 
 ########################################
 # UNUSED EBS
@@ -108,6 +121,12 @@ aws rds describe-db-instances \
 --query "DBInstances[].{DB:DBInstanceIdentifier,Engine:Engine,Class:DBInstanceClass,Status:DBInstanceStatus,MultiAZ:MultiAZ}" \
 --output table
 
+echo -e "\n🧊 STOPPED RDS (Storage Cost Continues):"
+aws rds describe-db-instances \
+--query "DBInstances[?DBInstanceStatus=='stopped'].{DB:DBInstanceIdentifier,Engine:Engine,Class:DBInstanceClass}" \
+--output table
+
+
 ########################################
 # LAMBDA FUNCTIONS
 ########################################
@@ -124,6 +143,16 @@ aws elbv2 describe-load-balancers \
 --query "LoadBalancers[].{Name:LoadBalancerName,Type:Type,State:State.Code}" \
 --output table
 
+
+########################################
+# ECR Old Images                        ########################################  
+echo -e "\n🐳 ECR REPOSITORIES (Old Images Storage Cost):"
+aws ecr describe-repositories \
+--query "repositories[].repositoryName" \
+--output table
+
+
+
 ########################################
 # CLOUDWATCH LOGS (NO RETENTION)
 ########################################
@@ -131,6 +160,10 @@ echo -e "\n📜 CLOUDWATCH LOG GROUPS WITHOUT RETENTION:"
 aws logs describe-log-groups \
 --query "logGroups[?retentionInDays==null].logGroupName" \
 --output table
+
+echo -e "\n📊 CLOUDWATCH CUSTOM METRICS:"
+aws cloudwatch list-metrics --namespace AWS/EC2 --output table
+
 
 ########################################
 # IAM USERS
@@ -234,10 +267,6 @@ aws ec2 describe-network-acls \
 --output table
 
 
-echo -e "\n🔐 SECURITY GROUPS:"
-aws ec2 describe-security-groups \
---query "SecurityGroups[].{SG:GroupId,VPC:VpcId,Name:GroupName}" \
---output table
 
 echo -e "\n🔗 VPC ENDPOINTS:"
 aws ec2 describe-vpc-endpoints \
@@ -248,6 +277,27 @@ echo -e "\n🔁 VPC PEERING CONNECTIONS:"
 aws ec2 describe-vpc-peering-connections \
 --query "VpcPeeringConnections[].{PeeringId:VpcPeeringConnectionId,Status:Status.Code}" \
 --output table
+
+
+echo -e "\n🚦 NAT GATEWAY DATA PROCESSING COST CHECK:"
+aws cloudwatch get-metric-statistics \
+--namespace AWS/NATGateway \
+--metric-name BytesOutToDestination \
+--start-time $(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ) \
+--end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+--period 86400 \
+--statistics Sum
+
+
+########################################
+# ===== Unused Security Groups =====
+########################################  
+
+echo -e "\n🧹 UNUSED SECURITY GROUPS (No Inbound Rules):"
+aws ec2 describe-security-groups \
+--query "SecurityGroups[?length(IpPermissions)==`0`].{SG:GroupId,Name:GroupName,VPC:VpcId}" \
+--output table
+
 
 
 ########################################
